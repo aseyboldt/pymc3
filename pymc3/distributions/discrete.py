@@ -48,6 +48,9 @@ class Binomial(Discrete):
 
     def random(self, point=None, size=None, repeat=None):
         n, p = draw_values([self.n, self.p], point=point)
+        if not issubclass(n.dtype.type, np.integer):
+            raise ValueError("Can not draw random sample for binomial "
+                             "with non-integer n.")
         return generate_samples(stats.binom.rvs, n=n, p=p,
                                 dist_shape=self.shape,
                                 size=size)
@@ -732,10 +735,15 @@ class ZeroInflatedNegativeBinomial(Discrete):
 
     .. math::
 
-       f(x \mid \psi, \mu, \alpha) = \left\{ \begin{array}{l}
-            (1-\psi) + \psi \left (\frac{\alpha}{\alpha+\mu} \right) ^\alpha, \text{if } x = 0 \\
-            \psi \frac{\Gamma(x+\alpha)}{x! \Gamma(\alpha)} \left (\frac{\alpha}{\mu+\alpha} \right)^\alpha \left( \frac{\mu}{\mu+\alpha} \right)^x, \text{if } x=1,2,3,\ldots
-            \end{array} \right.
+       f(x \mid \psi, \mu, \alpha) = \left\{
+         \begin{array}{l}
+           (1-\psi) + \psi \left (\frac{\alpha}{\alpha+\mu} \right) ^ \alpha,
+             \text{if } x = 0 \\
+           \psi \frac{\Gamma(x+\alpha)}{x! \Gamma(\alpha)}
+             \left (\frac{\alpha}{\mu+\alpha} \right)^\alpha
+             \left( \frac{\mu}{\mu+\alpha} \right)^x,
+             \text{if } x=1,2,3,\ldots
+           \end{array} \right.
 
     ========  ==========================
     Support   :math:`x \in \mathbb{N}_0`
@@ -792,7 +800,11 @@ class ZeroInflatedNegativeBinomial(Discrete):
         mu = dist.mu
         alpha = dist.alpha
         psi = dist.psi
-        return r'${} \sim \text{{ZeroInflatedNegativeBinomial}}(\mathit{{mu}}={}, \mathit{{alpha}}={}, \mathit{{psi}}={})$'.format(name,
-                                                get_variable_name(mu),
-                                                get_variable_name(alpha),
-                                                get_variable_name(psi))
+
+        name_mu = get_variable_name(mu)
+        name_alpha = get_variable_name(alpha)
+        name_psi = get_variable_name(psi)
+        template = (r"${} \sim \text{{ZeroInflatedNegativeBinomial}}"
+                    r"(\mathit{{mu}}={}, \mathit{{alpha}}={}, "
+                    r"\mathit{{psi}}={}")
+        return template.format(name_mu, name_alpha, name_psi)

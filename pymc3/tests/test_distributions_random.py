@@ -475,6 +475,10 @@ class TestScalarParameterSamples(SeededTest):
     def test_binomial(self):
         pymc3_random_discrete(pm.Binomial, {'n': Nat, 'p': Unit}, ref_rand=st.binom.rvs)
 
+        with pytest.raises(ValueError) as err:
+            pm.Binomial.dist(n=0.1, p=0.5).random()
+        err.match('non-integer n')
+
     def test_beta_binomial(self):
         pymc3_random_discrete(pm.BetaBinomial, {'n': Nat, 'alpha': Rplus, 'beta': Rplus},
                               ref_rand=self._beta_bin)
