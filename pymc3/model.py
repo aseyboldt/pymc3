@@ -840,6 +840,34 @@ def _get_scaling(total_size, shape, ndim):
     return tt.as_tensor(pm.floatX(coef))
 
 
+def random_variable_from_distcls(name, dist_cls, *args, **kwargs):
+    try:
+        model = pm.Model.get_context()
+    except TypeError:
+        raise TypeError("No model on context stack, which is needed to "
+                        "use the Normal('x', 0,1) syntax. "
+                        "Add a 'with model:' block")
+
+    if not isinstance(name, string_types):
+        raise TypeError("Name needs to be a string but got: {}".format(name))
+
+    data = kwargs.pop('observed', None)
+    if isinstance(data, ObservedRV) or isinstance(data, FreeRV):
+        raise TypeError("observed needs to be data but got: {}".format(type(data)))
+
+    total_size = kwargs.pop('total_size', None)
+
+    dims = kwargs.pop('dims', None)
+    shape = kwargs.pop('shape', None)
+    if shape is not None and dims is not None:
+        raise ValueError("Specify only one of 'dims' and 'shape'.")
+    if dims is not None:
+        shape = model._dims_to_shape(dims)
+
+    dist = dist_cls.dist(*args, **kwargs)
+    return model.Var(name, dist, data, total_size)
+
+
 class FreeRV(Factor, TensorVariable):
     """Unobserved random variable that a model is specified in terms of."""
 

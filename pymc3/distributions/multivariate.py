@@ -18,7 +18,7 @@ from pymc3.theanof import floatX
 from . import transforms
 from pymc3.util import get_variable_name
 from .distribution import Continuous, Discrete, draw_values, generate_samples
-from ..model import Deterministic
+from ..random_variable import Deterministic
 from .continuous import ChiSquared, Normal
 from .special import gammaln, multigammaln
 from .dist_math import bound, logpow, factln, Cholesky

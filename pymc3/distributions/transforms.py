@@ -1,14 +1,14 @@
 import theano.tensor as tt
 
-from ..model import FreeRV
 from ..theanof import gradient, floatX
 from . import distribution
 from ..math import logit, invlogit
 from .distribution import draw_values
+import pymc3 as pm
 import numpy as np
 
 __all__ = ['transform', 'stick_breaking', 'logodds', 'interval',
-          'lowerbound', 'upperbound', 'log', 'sum_to_1', 't_stick_breaking']
+           'lowerbound', 'upperbound', 'log', 'sum_to_1', 't_stick_breaking']
 
 
 class Transform(object):
@@ -63,7 +63,7 @@ class TransformedDistribution(distribution.Distribution):
 
         self.dist = dist
         self.transform_used = transform
-        v = forward(FreeRV(name='v', distribution=dist))
+        v = forward(pm.random_variable.FreeRV(name='v', distribution=dist))
         self.type = v.type
 
         super(TransformedDistribution, self).__init__(
@@ -90,7 +90,7 @@ class Log(ElemwiseTransform):
 
     def forward(self, x):
         return tt.log(x)
-    
+
     def forward_val(self, x, point=None):
         return self.forward(x)
 
@@ -111,7 +111,7 @@ class LogOdds(ElemwiseTransform):
 
     def forward(self, x):
         return logit(x)
-    
+
     def forward_val(self, x, point=None):
         return self.forward(x)
 
@@ -324,6 +324,6 @@ class CholeskyCovPacked(Transform):
 
     def forward_val(self, x, point=None):
         return self.forward(x)
-        
+
     def jacobian_det(self, y):
         return tt.sum(y[self.diag_idxs])

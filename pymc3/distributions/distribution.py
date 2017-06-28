@@ -4,10 +4,6 @@ import theano.tensor as tt
 from theano import function
 import theano
 from ..memoize import memoize
-from ..model import Model, get_named_nodes, FreeRV, ObservedRV
-from ..vartypes import string_types
-from .dist_math import bound
-# To avoid circular import for transform below
 import pymc3 as pm
 
 __all__ = ['DensityDist', 'Distribution', 'Continuous', 'Bound',
@@ -18,27 +14,274 @@ class _Unpickling(object):
     pass
 
 
+class AsStaticError(TypeError):
+    pass
+
+
+def _as_static(value):
+    return _draw_value(value)  # TODO no var.random()
+
+
+def _collect_inputs_recurse(value, known, needed, seen, names_seen):
+    if value in seen:
+        return
+    seen.add(value)
+
+    if value.name is not None:
+        if value.name in names_seen:
+            raise ValueError("Name '%s' is not unique." % value.name)
+        names_seen.add(value.name)
+
+        if value.name in known:
+            needed.add(value)
+            return
+
+    if value.owner is None:
+        # Throw an exception if it is not static
+        _as_static(value)
+        return
+
+    for parent in value.owner.inputs:
+        _collect_inputs_recurse(parent, known, needed, seen, names_seen)
+
+
+def _collect_inputs(value, known):
+    needed = set()
+    _collect_inputs_recurse(value, known, needed, set(), set())
+    return needed
+
+
+def _find_theano_inputs(values, available):
+    """Find a subset of required values needed to compute a set of values.
+
+    Parameters
+    ----------
+    values : iterable of thenao variables
+    available : list of variable names
+    """
+    inputs = set()
+    for value in values:
+        try:
+            inputs.update(_collect_inputs(value, available))
+        except AsStaticError:
+            raise ValueError('Can not compute %s because of unknown inputs.'
+                             % value)
+    inputs = list(inputs)
+    inputs.sort()
+    return inputs
+
+
+class Domain(object):
+    vectorized = True
+
+    def __init__(self, dtype, atom_shape):
+        self.dtype = dtype
+        self.type = tt.TensorType(dtype, [False] * atom_shape.ndim)
+
+    @property
+    def is_continuous(self):
+        return False
+
+    def suggested_diffeomorphism_to_reals(self):
+        if not self.is_continuous:
+            raise ValueError('Domain is not diffeomorph to reals.')
+        return None
+
+    def __contains__(self, other):
+        self.check_element(other)
+        return False
+
+    def check_element(self, element):
+        if element.dtype != self.dtype:
+            raise ValueError('Invalid dtype for element. Must be %s but is %s'
+                             % (self.dtype, element.dtype))
+
+        if element.ndim < self.atom_rank:
+            raise ValueError('Value is not large enough.')
+
+
+class Integers(Domain):
+    def __init__(self, dtype, shape, ndim):
+        self.dtype = np.dtype(dtype)
+        if not np.issubdtype(dtype, int):
+            raise ValueError('dtype must be an integer type.')
+        self.type = tt.TensorType(self.dtype, [False] * ndim)
+        self.atom_rank = ndim
+        self.atom_shape = shape
+
+
+class Naturals(Integers):
+    def __contains__(self, other):
+        return NotImplemented
+
+
+class PositiveIntegers(Integers):
+    def __contains__(self, other):
+        return NotImplemented
+
+
+class IntegerInterval(Integers):
+    def __contains__(self, other):
+        return NotImplemented
+
+
+class Reals(Domain):
+    def __init__(self, dtype, shape, ndim):
+        self.dtype = np.dtype(dtype)
+        if not np.issubdtype(dtype, float):
+            raise ValueError('dtype must be either float32 or float64.')
+        self.type = tt.TensorType(self.dtype, [False] * ndim)
+        self.atom_rank = ndim
+        self.atom_shape = shape
+
+    @property
+    def is_continuous(self):
+        return True
+
+    def diffeomorphism_to_reals(self):
+        return Identity(self)
+
+
+class Simplex(Domain):
+    def __init__(self, dtype, size):
+        self.dtype = np.dtype(dtype)
+        if not np.issubdtype(dtype, float):
+            raise ValueError('dtype must be either float32 or float64.')
+        self.type = tt.TensorType(self.dtype, [False])
+        self.atom_rank = 1
+        self.atom_shape = tt.stack(size)
+
+    @property
+    def is_continuous(self):
+        return True
+
+    def diffeomorphism_to_reals(self):
+        return StickBreaking(self)
+
+
+class PositiveReals(Reals):
+    def diffeomorphism_to_reals(self):
+        return LogTransform(self)
+
+
+class UnitInterval(Reals):
+    def __init__(self, *args, **kwargs):
+        super(UnitInterval, self).__init__(*args, **kwargs)
+        if self.atom_rank > 0:
+            raise ValueError('UnitInterval is only defined for atom_rank 0.')
+
+    def diffeomorphism_to_reals(self):
+        return LogitTransform(self)
+
+
+class RealInterval(Reals):
+    def diffeomorphism_to_reals(self):
+        return IntervalTransform(self)
+
+
+class RealCuboid(Reals):
+    def diffeomorphism_to_reals(self):
+        return CuboidTransform(self)
+
+
+class SymmetricMatrix(Real):
+    pass  # TODO
+
+
+class CholeskyMatrix(Real):
+    pass  # TODO
+
+
+class CircularWithPole(Real):
+    pass  # TODO
+
+
+class Diffeomorphism(object):
+    from_ = None
+    to_ = None
+
+    def transform(self, x):
+        pass
+
+    def inverse(self, y):
+        pass
+
+    def log_jacobian_det(self, x):
+        return -self.jacobian_det_inverse(self.transform(x))
+
+    def log_jacobian_det_inverse(self, y):
+        return -self.jacobian_det(self.inverse(y))
+
+
+class Identity(Diffeomorphism):
+    def __init__(self, domain):
+        self.from_ = domain
+        self.to_ = domain
+
+    def transform(self, x):
+        return x
+
+    def inverse(self, y):
+        return y
+
+    def jacobian_det(self, x):
+        return 0
+
+
+class LogTransform(Diffeomorphism):
+    def __init__(self, from_):
+        if not isinstance(from_, PositiveReals):
+            raise TypeError('from_ must be instance of PositiveReals.')
+        to_ = Reals(self.dtype, self.atom_rank, self.atom_shape)
+        self.from_ = from_
+        self.to_ = to_
+
+    def transform(self, x):
+        return tt.log(x)
+
+    def inverse(self, y):
+        return tt.exp(y)
+
+    def log_jacobian_det(self, x):
+        return -x
+
+    def log_jacobian_det_inverse(self, y):
+        return -tt.exp(y)
+
+
+class IntervalTransform(Diffeomorphism):
+    def __init__(self, from_):
+        if not isinstance(from_, RealInterval):
+            raise TypeError('from_ must be instance of PositiveReals.')
+        to_ = Reals(self.dtype, self.atom_rank, self.atom_shape)
+        self.from_ = from_
+        self.to_ = to_
+
+
+class StickBreaking(Diffeomorphism):
+    def __init__(self, from_):
+        if not isinstance(from_, Simplex):
+            raise TypeError('from_ must be a simplex domain.')
+        dtype = from_.dtype
+        size = from_.atom_shape[0] - 1
+        shape = theano.ifelse(
+            size > 0,
+            tt.stack(size),
+            theano.raise_op.Raise('Shape of simplex must be greater than 1'))
+        self.from_ = from_
+        self.to_ = Reals(dtype, shape, 1)
+
+    def transform(self, x):
+        NotImplemented
+
+
 class Distribution(object):
-    """Statistical distribution"""
+    """A Statistical distribution. """
     def __new__(cls, name, *args, **kwargs):
         if name is _Unpickling:
             return object.__new__(cls)  # for pickle
-        try:
-            model = Model.get_context()
-        except TypeError:
-            raise TypeError("No model on context stack, which is needed to "
-                            "use the Normal('x', 0,1) syntax. "
-                            "Add a 'with model:' block")
-
-        if isinstance(name, string_types):
-            data = kwargs.pop('observed', None)
-            if isinstance(data, ObservedRV) or isinstance(data, FreeRV):
-                raise TypeError("observed needs to be data but got: {}".format(type(data)))
-            total_size = kwargs.pop('total_size', None)
-            dist = cls.dist(*args, **kwargs)
-            return model.Var(name, dist, data, total_size)
-        else:
-            raise TypeError("Name needs to be a string but got: {}".format(name))
+        return pm.random_variable.random_variable_from_distcls(
+            name, cls, *args, **kwargs)
 
     def __getnewargs__(self):
         return _Unpickling,
@@ -49,45 +292,63 @@ class Distribution(object):
         dist.__init__(*args, **kwargs)
         return dist
 
-    def __init__(self, shape, dtype, testval=None, defaults=(),
-                 transform=None, broadcastable=None):
-        self.shape = np.atleast_1d(shape)
-        if False in (np.floor(self.shape) == self.shape):
-            raise TypeError("Expected int elements in shape")
-        self.dtype = dtype
-        self.type = TensorType(self.dtype, self.shape, broadcastable)
-        self.testval = testval
-        self.defaults = defaults
-        self.transform = transform
-
-    def default(self):
-        return np.asarray(self.get_test_val(self.testval, self.defaults), self.dtype)
-
-    def get_test_val(self, val, defaults):
-        if val is None:
-            for v in defaults:
-                if hasattr(self, v) and np.all(np.isfinite(self.getattr_value(v))):
-                    return self.getattr_value(v)
+    def __init__(self, domain, param_shape, dtype, statistic_names,
+                 params, default):
+        if isinstance(param_shape, numbers.Integral):
+            param_shape = (param_shape,)
+        if isinstance(param_shape, tuple):
+            self._static_param_shape = param_shape
+            self._param_shape = tt.as_tensor_variable(param_shape)
         else:
-            return self.getattr_value(val)
+            self._static_param_shape = None
+            self._param_shape = tt.as_tensor_variable(param_shape)
+        self.param_rank = self._param_shape.ndim
 
-        if val is None:
-            raise AttributeError("%s has no finite default value to use, "
-                                 "checked: %s. Pass testval argument or "
-                                 "adjust so value is finite."
-                                 % (self, str(defaults)))
+        if (not np.issubdtype(self._atom_shape.dtype, int)
+                or not np.issubdtype(self._param_shape.dtype, int)):
+            raise TypeError("Expected int elements in shape")
 
-    def getattr_value(self, val):
-        if isinstance(val, string_types):
-            val = getattr(self, val)
+        self.dtype = dtype
+        self._statistic_names = statistic_names
+        self._default = default
+        self._params = params
 
-        if isinstance(val, tt.TensorVariable):
-            return val.tag.test_value
+    def compute_default(self, point, shape):
+        default = self._compute_values([self._default], mode='FAST_COMPILE')()[0]
+        if not np.can_cast(default.dtype, self.dtype):
+            raise ValueError('The default value has an invalid type. It is %s '
+                             'but should be %s' % (default.dtype, self.dtype))
+        default = default.astype(self.dtype)
+        param_shape = self.compute_param_shape(point)
+        default = np.broadcast_to(default, param_shape)
+        return np.broadcast_to(default, shape)
 
-        if isinstance(val, tt.TensorConstant):
-            return val.value
+    def compute_statistics(self, point):
+        stats = {}
+        names = []
+        for name in self._statistic_names:
+            stat = getattr(self, name, None)
+            if stat is not None:
+                stats.append(stat)
+                names.append(names)
+        stats = self._compute_values(stats, mode='FAST_COMPILE')()
+        return dict(zip(names, stats))
 
-        return val
+    def compute_params(self, point):
+        names, vars = zip(*list(self._params.items()))
+        vals = self._compute_values(vars, mode='FAST_COMPILE')()
+        return dict(zip(names, vals))
+
+    def comute_param_shape(self, point):
+        if self._static_param_shape is not None:
+            return self._static_param_shape
+        return self._compute_values(self._param_shape, mode='FAST_COMPILE')()
+
+    def logp(self, x):
+        return NotImplemented
+
+    def logp_sum(self, x):
+        return self.logp(x).sum()
 
     def _repr_latex_(self, name=None, dist=None):
         return None
