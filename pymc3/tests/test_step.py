@@ -209,11 +209,11 @@ class TestStepMethods(object):  # yield test doesn't work subclassing object
                 step = step_method(scaling=model.test_point)
                 trace = sample(0, tune=n_steps,
                                discard_tuned_samples=False,
-                               step=step, random_seed=1)
+                               step=step, random_seed=1, chains=1)
             else:
                 trace = sample(0, tune=n_steps,
                                discard_tuned_samples=False,
-                               step=step_method(), random_seed=1)
+                               step=step_method(), random_seed=1, chains=1)
         assert_array_almost_equal(
             trace.get_values('x'),
             self.master_samples[step_method],
@@ -243,7 +243,7 @@ class TestStepMethods(object):  # yield test doesn't work subclassing object
                     HamiltonianMC(scaling=C, is_cov=True, blocked=False)]),
             )
         for step in steps:
-            trace = sample(0, tune=8000,
+            trace = sample(0, tune=8000, chains=1,
                            discard_tuned_samples=False, step=step,
                            start=start, model=model, random_seed=1)
             self.check_stat(check, trace, step.__class__.__name__)
