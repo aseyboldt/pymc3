@@ -2,13 +2,16 @@ import numpy as np
 from numpy.random import normal
 import scipy.linalg
 from scipy.sparse import issparse
+import scipy.sparse.linalg as slinalg
+from scipy import linalg, stats
 import theano
 
 from pymc3.theanof import floatX
 
 
 __all__ = ['quad_potential', 'QuadPotentialDiag', 'QuadPotentialFull',
-           'QuadPotentialFullInv', 'QuadPotentialDiagAdapt', 'isquadpotential']
+           'QuadPotentialFullInv', 'QuadPotentialDiagAdapt', 'isquadpotential',
+           'QuadPotentialLowRank']
 
 
 def quad_potential(C, is_cov):
@@ -454,6 +457,215 @@ class QuadPotentialFull(QuadPotential):
         return 0.5 * np.dot(x, v_out)
 
     __call__ = random
+
+
+def add_ADATv(A, v, out, diag=None, beta=0., work=None):
+    """Run out = beta * out + A @ np.diag(D) @ A.T @ v"""
+    if work is None:
+        work = np.empty(A.shape[1])
+    linalg.blas.dgemv(1., A, v, y=work, trans=1, beta=0., overwrite_y=True)
+    if diag is not None:
+        work *= diag
+    linalg.blas.dgemv(1., A, work, y=out, beta=beta, overwrite_y=True)
+
+
+class Covariance:
+    def __init__(self, n_dim, n_svd, n_approx, values, grads, diag=None):
+        assert n_svd <= len(values)
+        assert values.shape == grads.shape
+
+        self.values = values - values.mean(0)
+        self.grads = grads - grads.mean(0)
+
+        val_variance = self.values.var(0)
+        grd_variance = self.grads.var(0)
+        self._val_var = val_variance
+        self._grd_var = grd_variance
+        if diag == 'mean':
+            self.diag = np.sqrt(val_variance/grd_variance)
+        elif diag == 'values':
+            self.diag = np.sqrt(val_variance)
+        elif isinstance(diag, np.ndarray):
+            self.diag = np.sqrt(diag)
+        else:
+            raise ValueError('Unknown diag approximation: %s' % diag)
+        self.invsqrtdiag = 1 / np.sqrt(self.diag)
+        self.values /= self.diag[None, :]
+        self.grads *= self.diag[None, :]
+
+        _, svdvals, vecs = linalg.svd(self.values, full_matrices=False)
+        self.vals_eigs = 2 * np.log(svdvals[:n_svd]) - np.log(len(values))
+        self.vals_vecs = vecs.T[:, :n_svd].copy()
+
+        _, svdvals, vecs = linalg.svd(self.grads, full_matrices=False)
+        self.grad_eigs = -2 * np.log(svdvals[:n_svd]) + np.log(len(grads))
+        self.grad_vecs = vecs.T[:, :n_svd].copy()
+
+        self.n_dim = n_dim
+        self.n_svd = n_svd
+        self.n_approx = n_approx
+
+        if n_svd < n_dim // 3:
+            center_slice = slice(n_svd // 3, None)
+        else:
+            center_slice = slice(2*n_svd // 3, (2 * n_dim) // 3)
+
+        self.center = 0.5 * (
+            self.grad_eigs[center_slice].mean()
+            + self.vals_eigs[center_slice].mean())
+
+        self.vals_eigs -= self.center
+        self.grad_eigs -= self.center
+
+        weight = stats.beta(0.5, 0.5).cdf(np.linspace(0, 1, n_dim))
+        self.weight = 1 - weight[:n_svd]
+
+        self._make_operators(n_approx)
+
+    def to_dense(self):
+        vecs, eigs = self.vals_vecs, self.vals_eigs
+        A = (vecs * eigs * self.weight) @ vecs.T
+
+        vecs, eigs = self.grad_vecs, self.grad_eigs
+        B = (vecs * eigs * self.weight) @ vecs.T
+
+        corr = np.exp(self.center) * linalg.expm(A + B)
+        corr *= self.diag[:, None]
+        corr *= self.diag[None, :]
+        return corr
+
+    def invsqrt_to_dense(self):
+        assert False  # TODO This is wrong
+        vecs, eigs = self.vals_vecs, self.vals_eigs
+        A = (vecs * eigs * self.weight) @ vecs.T
+
+        vecs, eigs = self.grad_vecs, self.grad_eigs
+        B = (vecs * eigs * self.weight) @ vecs.T
+
+        corr = np.exp(-0.5*self.center) * linalg.expm(-0.5*(A + B))
+        corr *= self.invsqrtdiag[:, None]
+        corr *= self.invsqrtdiag[None, :]
+        return corr
+
+    def matmul(self, x, out=None):
+        if out is None:
+            out = np.empty_like(x)
+
+        self._matmul(x * self.diag, out)
+        out *= self.diag
+        return out
+
+    def invsqrtmul(self, x, out=None):
+        if out is None:
+            out = np.empty_like(x)
+        self._matmul_invsqrt(x, out)
+        return out / self.diag
+
+    def _make_operators(self, n_eigs, exponent=1):
+        vecs1, eigs1 = self.vals_vecs, self.vals_eigs
+        vecs2, eigs2 = self.grad_vecs, self.grad_eigs
+        vecs1 = np.ascontiguousarray(vecs1)
+        vecs2 = np.ascontiguousarray(vecs2)
+
+        def upper_matmul(x):
+            out = np.empty_like(x)
+            work = np.empty(len(eigs1))
+            add_ADATv(vecs1, x, out, diag=eigs1 * self.weight, beta=0.0, work=work)
+            add_ADATv(vecs2, x, out, diag=eigs2 * self.weight, beta=1.0, work=work)
+            return out
+
+        upper = slinalg.LinearOperator((self.n_dim, self.n_dim), upper_matmul)
+        eigs, vecs = slinalg.eigsh(upper, k=n_eigs, mode='buckling')
+        self._matrix_logeigs = eigs
+        eigs_exp = np.exp(eigs)
+        eigs_invsqrtexp = np.exp(-0.5*eigs)
+
+        def matmul_exp(x, out):
+            work = np.empty(len(eigs))
+            add_ADATv(vecs, x, out, diag=None, beta=0.0, work=work)
+            add_ADATv(vecs, x, out, diag=eigs_exp, beta=-1.0, work=work)
+            out += x
+            out *= np.exp(self.center)
+
+        def matmul_invsqrtexp(x, out):
+            work = np.empty(len(eigs))
+            add_ADATv(vecs, x, out, diag=None, beta=0.0, work=work)
+            add_ADATv(vecs, x, out, diag=eigs_invsqrtexp, beta=-1.0, work=work)
+            out += x
+            out *= np.exp(-0.5*self.center)
+
+        self._matmul = matmul_exp
+        self._matmul_invsqrt = matmul_invsqrtexp
+
+
+class QuadPotentialLowRank(object):
+    def __init__(self, ndim, n_approx, diag):
+        self._cov = None
+        self._iter = 0
+        self._ndim = ndim
+        self._n_approx = n_approx
+        self._diag = diag
+        self._old_covs = []
+
+        self._grad_store = []
+        self._sample_store = []
+        self.dtype = 'float64'
+
+    def velocity(self, x, out=None):
+        if self._cov is None:
+            if out is None:
+                out = np.empty_like(x)
+            out[:] = x
+            return out
+
+        return self._cov.matmul(x, out=out)
+
+    def energy(self, x, velocity=None):
+        if velocity is None:
+            velocity = self.velocity(x)
+        return 0.5 * x.dot(velocity)
+
+    def random(self):
+        rand = np.random.randn(self._ndim)
+        if self._cov is None:
+            return rand
+        return self._cov.invsqrtmul(rand)
+
+    def velocity_energy(self, x, v_out):
+        self.velocity(x, out=v_out)
+        return 0.5 * np.dot(x, v_out)
+
+    def raise_ok(self, *args, **kwargs):
+        pass
+
+    def update(self, sample, grad, tune):
+        self._iter += 1
+        if not tune:
+            return
+
+        if self._iter < 50:
+            return
+
+        renew_iters = [120, 240, 400, 850]
+        if self._iter not in renew_iters:
+            self._grad_store.append(grad.copy())
+            self._sample_store.append(sample.copy())
+            return
+
+        n_samples = len(self._grad_store)
+        samples = np.array(self._sample_store)
+        grads = np.array(self._grad_store)
+        self._sample_store.clear()
+        self._grad_store.clear()
+        if self._iter <= 160:
+            n_approx = 4
+        else:
+            n_approx = self._n_approx
+        if self._cov is not None:
+            self._old_covs.append(self._cov)
+        n_svd = min(self._ndim - 5, n_samples - 5)
+        self._cov = Covariance(self._ndim, n_svd, n_approx,
+                               samples, grads, diag=self._diag)
 
 
 try:
