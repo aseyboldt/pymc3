@@ -470,7 +470,7 @@ def sample(
         _log.info("Multiprocess sampling ({} chains in {} jobs)".format(chains, cores))
         _print_step_hierarchy(step)
         try:
-            trace = _mp_sample(**sample_args)
+            trace = _mp_sample(**sample_args, discard_tuned_samples=discard_tuned_samples)
         except pickle.PickleError:
             _log.warning("Could not pickle model, sampling singlethreaded.")
             _log.debug("Pickling error:", exec_info=True)
@@ -1076,6 +1076,7 @@ def _mp_sample(
     progressbar=True,
     trace=None,
     model=None,
+    discard_tuned_samples=True,
     **kwargs
 ):
 
@@ -1126,7 +1127,10 @@ def _mp_sample(
             raise
         return MultiTrace(traces)
     except KeyboardInterrupt:
-        traces, length = _choose_chains(traces, tune)
+        if discard_tuned_samples:
+            traces, length = _choose_chains(traces, tune)
+        else:
+            traces, length = _choose_chains(traces, 0)
         return MultiTrace(traces)[:length]
     finally:
         for trace in traces:
