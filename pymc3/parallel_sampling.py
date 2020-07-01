@@ -163,6 +163,8 @@ class _Process:
 
     def _write_point(self, point):
         for name, vals in point.items():
+            if name == '__beta':
+                continue
             self._point[name][...] = vals
 
     def _recv_msg(self):

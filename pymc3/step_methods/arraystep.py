@@ -235,13 +235,14 @@ class PopulationArrayStepShared(ArrayStepShared):
 
 class GradientSharedStep(BlockedStep):
     def __init__(self, vars, model=None, blocked=True,
-                 dtype=None, **theano_kwargs):
+                 dtype=None, func=None, **theano_kwargs):
         model = modelcontext(model)
         self.vars = vars
         self.blocked = blocked
 
-        func = model.logp_dlogp_function(
-            vars, dtype=dtype, **theano_kwargs)
+        if func is None:
+            func = model.logp_dlogp_function(
+                vars, dtype=dtype, **theano_kwargs)
 
         # handle edge case discovered in #2948
         try:

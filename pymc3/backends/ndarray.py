@@ -280,6 +280,8 @@ class NDArray(base.BaseTrace):
         point: dict
             Values mapped to variable names
         """
+        if '__beta' in point:
+            del point['__beta']
         for varname, value in zip(self.varnames, self.fn(point)):
             self.samples[varname][self.draw_idx] = value
 

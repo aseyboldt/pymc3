@@ -659,7 +659,8 @@ class ValueGradFunction:
     def set_extra_values(self, extra_vars):
         self._extra_are_set = True
         for var in self._extra_vars:
-            self._extra_vars_shared[var.name].set_value(extra_vars[var.name])
+            if var in extra_vars:
+                self._extra_vars_shared[var.name].set_value(extra_vars[var.name])
 
     def get_extra_values(self):
         if not self._extra_are_set:
